@@ -349,41 +349,50 @@ with tab_ef:
     else:
         npf = st.select_slider("Random portfolios", [1000, 2000, 5000, 10000], value=5000)
         ef = A.efficient_frontier(asset_rets, n_portfolios=int(npf), rf=rf, seed=7)
-        cloud, ms, mv = ef["cloud"], ef["max_sharpe"], ef["min_vol"]
-        cw = cur_weights(got)
-        cr, cvol, csh = A.weights_stats(asset_rets, cw, rf=rf)
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=cloud["vol"], y=cloud["ret"], mode="markers",
-                                 marker=dict(size=4, color=cloud["sharpe"],
-                                             colorscale="Viridis", showscale=True,
-                                             colorbar=dict(title="Sharpe")),
-                                 name="portfolios", opacity=0.5))
-        fig.add_trace(go.Scatter(x=[ms["vol"]], y=[ms["ret"]], mode="markers",
-                                 marker=dict(size=16, symbol="star", color="gold",
-                                             line=dict(width=1, color="black")),
-                                 name="max Sharpe"))
-        fig.add_trace(go.Scatter(x=[mv["vol"]], y=[mv["ret"]], mode="markers",
-                                 marker=dict(size=14, symbol="diamond", color="cyan",
-                                             line=dict(width=1, color="black")),
-                                 name="min variance"))
-        fig.add_trace(go.Scatter(x=[cvol], y=[cr], mode="markers",
-                                 marker=dict(size=14, symbol="x", color="red"),
-                                 name="your weights"))
-        fig.update_layout(height=480, xaxis_title="Annualized volatility (risk)",
-                          yaxis_title="Annualized return",
-                          legend=dict(orientation="h", y=-0.2))
-        st.plotly_chart(fig, use_container_width=True)
-        cA, cB = st.columns(2)
-        with cA:
-            st.markdown("**Max-Sharpe weights**")
-            st.dataframe(pd.DataFrame({"Ticker": ef["cols"],
-                                       "Weight": [f"{ms[c]:.1%}" for c in ef["cols"]]}),
-                         hide_index=True, use_container_width=True)
-        with cB:
-            st.markdown("**Min-variance weights**")
-            st.dataframe(pd.DataFrame({"Ticker": ef["cols"],
-                                       "Weight": [f"{mv[c]:.1%}" for c in ef["cols"]]}),
-                         hide_index=True, use_container_width=True)
+        if ef is None:
+            st.warning(
+                "Can't build a frontier with this combination of assets. This usually "
+                "happens when one ticker has near-zero volatility (e.g. a money-market "
+                "or very stable bond ETF like IBCH) — there's not enough price variation "
+                "to generate meaningful risk/return trade-offs. Try swapping it for a "
+                "higher-volatility asset, or check the time window (a very short window "
+                "can also produce too few data points).")
+        else:
+            cloud, ms, mv = ef["cloud"], ef["max_sharpe"], ef["min_vol"]
+            cw = cur_weights(got)
+            cr, cvol, csh = A.weights_stats(asset_rets, cw, rf=rf)
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=cloud["vol"], y=cloud["ret"], mode="markers",
+                                     marker=dict(size=4, color=cloud["sharpe"],
+                                                 colorscale="Viridis", showscale=True,
+                                                 colorbar=dict(title="Sharpe")),
+                                     name="portfolios", opacity=0.5))
+            fig.add_trace(go.Scatter(x=[ms["vol"]], y=[ms["ret"]], mode="markers",
+                                     marker=dict(size=16, symbol="star", color="gold",
+                                                 line=dict(width=1, color="black")),
+                                     name="max Sharpe"))
+            fig.add_trace(go.Scatter(x=[mv["vol"]], y=[mv["ret"]], mode="markers",
+                                     marker=dict(size=14, symbol="diamond", color="cyan",
+                                                 line=dict(width=1, color="black")),
+                                     name="min variance"))
+            fig.add_trace(go.Scatter(x=[cvol], y=[cr], mode="markers",
+                                     marker=dict(size=14, symbol="x", color="red"),
+                                     name="your weights"))
+            fig.update_layout(height=480, xaxis_title="Annualized volatility (risk)",
+                              yaxis_title="Annualized return",
+                              legend=dict(orientation="h", y=-0.2))
+            st.plotly_chart(fig, use_container_width=True)
+            cA, cB = st.columns(2)
+            with cA:
+                st.markdown("**Max-Sharpe weights**")
+                st.dataframe(pd.DataFrame({"Ticker": ef["cols"],
+                                           "Weight": [f"{ms[c]:.1%}" for c in ef["cols"]]}),
+                             hide_index=True, use_container_width=True)
+            with cB:
+                st.markdown("**Min-variance weights**")
+                st.dataframe(pd.DataFrame({"Ticker": ef["cols"],
+                                           "Weight": [f"{mv[c]:.1%}" for c in ef["cols"]]}),
+                             hide_index=True, use_container_width=True)
 
 
 # --------------------------------------------------------------------------- #
