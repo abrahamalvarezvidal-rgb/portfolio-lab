@@ -251,6 +251,10 @@ def efficient_frontier(returns_df, n_portfolios=4000, rf=0.0, seed=None):
     k = len(cols)
     if k < 2:
         return None
+    # drop rows where any ticker has missing data, and require enough history
+    returns_df = returns_df.dropna()
+    if len(returns_df) < 10:
+        return None
     rng = np.random.default_rng(seed)
     mean_daily = returns_df.mean().values
     cov_daily = returns_df.cov().values
@@ -263,6 +267,10 @@ def efficient_frontier(returns_df, n_portfolios=4000, rf=0.0, seed=None):
     df = pd.DataFrame({"ret": ann_ret, "vol": vol, "sharpe": sharpe})
     for i, c in enumerate(cols):
         df[c] = W[:, i]
+    # if all Sharpe values are NaN (happens with near-zero-variance assets like money-market
+    # ETFs where vol ≈ 0 across all weight combinations), there is no meaningful frontier
+    if df["sharpe"].isna().all():
+        return None
     return {
         "cloud": df,
         "max_sharpe": df.loc[df["sharpe"].idxmax()],
