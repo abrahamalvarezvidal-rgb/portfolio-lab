@@ -4,9 +4,9 @@ app.py - Streamlit portfolio dashboard.
 Run with:  streamlit run app.py
 
 Tabs:
-  Compare assets · Charts & trends · Normality · Portfolio ·
-  Monte Carlo · Efficient frontier · Benchmark comparison ·
-  My portfolio (real tracker) · Export to Excel
+  My portfolio (real tracker) · Simulate portfolio · Compare assets ·
+  Charts & trends · Normality · Monte Carlo · Efficient frontier ·
+  Benchmark comparison · Export to Excel
 """
 import numpy as np
 import pandas as pd
@@ -84,7 +84,7 @@ with st.sidebar:
     use_log = st.checkbox("Use log returns", value=False)
     st.divider()
     st.caption("Import a portfolio in the 'My portfolio' tab to set these tickers "
-               "and the Portfolio-tab weights from your real holdings.")
+               "and the Simulate portfolio weights from your real holdings.")
 
 tickers = [t.strip().upper() for t in tickers_raw.split(",") if t.strip()]
 rf = rf_pct / 100.0
@@ -130,6 +130,37 @@ def cur_weights(symbols):
     return w if sum(w) else [1.0] * len(symbols)
 
 
+def my_portfolio_weight_map(symbols, price_frame=None):
+    """Current My Portfolio weights by market value for the requested symbols."""
+    if not _held_shares or not symbols:
+        return {}
+    mv = {}
+    for t in symbols:
+        if t not in _held_shares:
+            continue
+        px = None
+        if price_frame is not None and t in price_frame.columns:
+            hist = price_frame[t].dropna()
+            if len(hist):
+                px = float(hist.iloc[-1])
+        if px is None:
+            px = latest_prices(tuple([t])).get(t)
+        if px and px > 0:
+            mv[t] = _held_shares[t] * float(px)
+    total = sum(mv.values())
+    return {t: v / total for t, v in mv.items()} if total > 0 else {}
+
+
+def reset_simulation_weights_to_my_portfolio(symbols, price_frame=None):
+    weights = my_portfolio_weight_map(symbols, price_frame)
+    if not weights:
+        return False
+    for t in symbols:
+        st.session_state[f"w_{t}"] = round(float(weights.get(t, 0.0)), 6)
+    st.session_state["_weights_seeded"] = True
+    return True
+
+
 if not tickers:
     st.info("Add at least one ticker in the sidebar to begin.")
     st.stop()
@@ -155,11 +186,11 @@ have_bench = benchmark in prices.columns
 mkt_rets = rets[benchmark] if have_bench else None
 asset_prices, asset_rets = prices[got], rets[got]
 
-(tab_cmp, tab_chart, tab_norm, tab_port, tab_mc, tab_ef,
- tab_bench, tab_track, tab_xl) = st.tabs(
-    ["Compare assets", "Charts & trends", "Normality", "Portfolio",
-     "Monte Carlo", "Efficient frontier", "Benchmark comparison",
-     "My portfolio", "Export"])
+(tab_track, tab_port, tab_cmp, tab_chart, tab_norm, tab_mc, tab_ef,
+ tab_bench, tab_xl) = st.tabs(
+    ["My portfolio", "Simulate portfolio", "Compare assets", "Charts & trends",
+     "Normality", "Monte Carlo", "Efficient frontier",
+     "Benchmark comparison", "Export"])
 
 
 # --------------------------------------------------------------------------- #
@@ -250,27 +281,24 @@ with tab_norm:
 
 
 # --------------------------------------------------------------------------- #
-# 4. Portfolio
+# 2. Simulate portfolio
 # --------------------------------------------------------------------------- #
 with tab_port:
-    st.subheader("Simulate a portfolio")
+    st.subheader("Simulate portfolio")
     st.caption("Weights default to your real holdings (by market value) when available; "
                "change them freely. Risk uses covariance, so it's usually below the "
                "average of individual vols — diversification.")
 
+    if st.button("↩️ Reset weights to My Portfolio weights", use_container_width=True):
+        if reset_simulation_weights_to_my_portfolio(got, asset_prices):
+            st.success("Simulation weights reset to your current My Portfolio market-value weights.")
+            st.rerun()
+        else:
+            st.info("No My Portfolio holdings are available for the current tickers yet.")
+
     # One-time seed from the saved portfolio, by market value (reusing fetched prices).
     if not st.session_state.get("_weights_seeded") and _held_shares:
-        mv = {}
-        for t in got:
-            if t in _held_shares and t in prices.columns:
-                px = prices[t].dropna()
-                if len(px):
-                    mv[t] = _held_shares[t] * float(px.iloc[-1])
-        tot = sum(mv.values())
-        if tot > 0:
-            for t, v in mv.items():
-                st.session_state[f"w_{t}"] = round(v / tot, 3)
-        st.session_state["_weights_seeded"] = True
+        reset_simulation_weights_to_my_portfolio(got, asset_prices)
     # Ensure every current ticker has a starting weight (covers no-ledger and added tickers).
     for t in got:
         st.session_state.setdefault(f"w_{t}", round(1.0 / len(got), 3))
@@ -398,7 +426,7 @@ with tab_ef:
                               yaxis_title="Annualized return",
                               legend=dict(orientation="h", y=-0.2))
             st.plotly_chart(fig, use_container_width=True)
-            cA, cB = st.columns(2)
+            cA, cB, cC = st.columns(3)
             with cA:
                 st.markdown("**Max-Sharpe weights**")
                 st.dataframe(pd.DataFrame({"Ticker": ef["cols"],
@@ -408,6 +436,13 @@ with tab_ef:
                 st.markdown("**Min-variance weights**")
                 st.dataframe(pd.DataFrame({"Ticker": ef["cols"],
                                            "Weight": [f"{mv[c]:.1%}" for c in ef["cols"]]}),
+                             hide_index=True, use_container_width=True)
+            with cC:
+                st.markdown("**Your weights**")
+                normalized_cw = np.array(cw, dtype=float)
+                normalized_cw = normalized_cw / normalized_cw.sum() if normalized_cw.sum() else normalized_cw
+                st.dataframe(pd.DataFrame({"Ticker": ef["cols"],
+                                           "Weight": [f"{w:.1%}" for w in normalized_cw]}),
                              hide_index=True, use_container_width=True)
 
 
@@ -456,7 +491,7 @@ with tab_bench:
 
 
 # --------------------------------------------------------------------------- #
-# 8. My portfolio (real tracker)
+# 1. My portfolio (real tracker)
 # --------------------------------------------------------------------------- #
 def fmt_money(x, factor, sym):
     return "—" if pd.isna(x) else f"{sym}{x * factor:,.2f}"
@@ -588,15 +623,50 @@ def _render_tracker(ledger, factor, sym, ccy, fx, benchmark):
     # ---- rebalance planner ----
     st.divider()
     st.markdown("**Rebalance planner** — design a target mix and get the exact orders.")
-    st.caption("Each ticker traded counts as one of your 10 monthly transactions.")
-    seed = pd.DataFrame({
-        "Ticker": held["Ticker"].tolist(),
-        "Target %": [round(100 * v / total_mv, 2) if total_mv else 0.0
-                     for v in held["Market Value"]],
-    }) if total_mv else pd.DataFrame({"Ticker": held["Ticker"].tolist(),
-                                      "Target %": [0.0] * len(held)})
+    st.caption("Each ticker traded counts as one of your 10 monthly transactions. You can type weights manually or load Max-Sharpe / Min-variance weights from an efficient frontier calculated on your current holdings.")
+
+    def _current_target_seed():
+        return pd.DataFrame({
+            "Ticker": held["Ticker"].tolist(),
+            "Target %": [round(100 * v / total_mv, 2) if total_mv else 0.0
+                         for v in held["Market Value"]],
+        }) if total_mv else pd.DataFrame({"Ticker": held["Ticker"].tolist(),
+                                          "Target %": [0.0] * len(held)})
+
+    seed = st.session_state.get("_target_seed_override")
+    if seed is None:
+        seed = _current_target_seed()
+
+    opt_cols = st.columns([2, 1])
+    with opt_cols[0]:
+        ef_choice = st.selectbox(
+            "Load target weights from",
+            ["Current My Portfolio weights", "Efficient frontier: Max Sharpe",
+             "Efficient frontier: Min variance"],
+            help="The efficient-frontier options use the price history of the tickers you currently hold."
+        )
+    with opt_cols[1]:
+        if st.button("Load into planner", use_container_width=True):
+            new_seed = _current_target_seed()
+            if ef_choice != "Current My Portfolio weights":
+                ef_tickers = held["Ticker"].tolist()
+                ef_prices = range_prices[[t for t in ef_tickers if t in range_prices.columns]].ffill()
+                ef_rets = A.compute_returns(ef_prices, log=use_log)
+                ef_calc = A.efficient_frontier(ef_rets, n_portfolios=10000, rf=rf, seed=7)
+                if ef_calc is None:
+                    st.warning("Could not calculate an efficient frontier for the current holdings and time window.")
+                else:
+                    row = ef_calc["max_sharpe"] if "Max Sharpe" in ef_choice else ef_calc["min_vol"]
+                    new_seed = pd.DataFrame({
+                        "Ticker": ef_calc["cols"],
+                        "Target %": [round(float(row[t]) * 100, 2) for t in ef_calc["cols"]],
+                    })
+            st.session_state["_target_seed_override"] = new_seed
+            st.session_state["_target_editor_version"] = st.session_state.get("_target_editor_version", 0) + 1
+            st.rerun()
+
     target_edit = st.data_editor(seed, num_rows="dynamic", use_container_width=True,
-                                 key="target_editor",
+                                 key=f"target_editor_{st.session_state.get('_target_editor_version', 0)}",
                                  column_config={"Target %": st.column_config.NumberColumn(
                                      "Target %", min_value=0.0, max_value=100.0, format="%.2f")})
     extra_disp = st.number_input(f"Add/withdraw cash ({sym}, optional)", value=0.0, step=100.0)
@@ -756,3 +826,4 @@ with tab_xl:
         st.caption(f"Values in {mp['currency']}. Sheets: Summary, Holdings (with Weight), "
                    "Ledger, Growth (TWR vs benchmark).")
         st.dataframe(mp["summary"], hide_index=True, use_container_width=True)
+
