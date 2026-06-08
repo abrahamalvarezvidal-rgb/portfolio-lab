@@ -5,7 +5,7 @@ Run with:  streamlit run app.py
 
 Tabs:
   My portfolio (real tracker) · Simulate portfolio · Compare assets ·
-  Charts & trends · Normality · Monte Carlo · Efficient frontier ·
+  Charts & trends · Normality · Efficient frontier · Monte Carlo ·
   Benchmark comparison · Export to Excel
 """
 import numpy as np
@@ -161,6 +161,32 @@ def reset_simulation_weights_to_my_portfolio(symbols, price_frame=None):
     return True
 
 
+def frontier_weight_map(returns_frame, source, rf=0.0, seed=7):
+    """Return optimized weights for the requested efficient-frontier source."""
+    if source not in ("Max Sharpe ratio portfolio weights",
+                      "Min-variance portfolio weights",
+                      "Efficient frontier: Max Sharpe",
+                      "Efficient frontier: Min variance"):
+        return None
+    if returns_frame is None or returns_frame.shape[1] < 2:
+        return None
+    ef_calc = A.efficient_frontier(returns_frame, n_portfolios=10000, rf=rf, seed=seed)
+    if ef_calc is None:
+        return None
+    row = ef_calc["max_sharpe"] if "Max Sharpe" in source else ef_calc["min_vol"]
+    return {t: float(row.get(t, 0.0)) for t in ef_calc["cols"]}
+
+
+def apply_weight_map_to_simulation(symbols, weight_map):
+    """Sync simulation number inputs with a selected weight source."""
+    if not weight_map:
+        return False
+    for t in symbols:
+        st.session_state[f"w_{t}"] = round(float(weight_map.get(t, 0.0)), 6)
+    st.session_state["_weights_seeded"] = True
+    return True
+
+
 if not tickers:
     st.info("Add at least one ticker in the sidebar to begin.")
     st.stop()
@@ -289,46 +315,29 @@ with tab_port:
                "change them freely. Risk uses covariance, so it's usually below the "
                "average of individual vols — diversification.")
 
-    preset_cols = st.columns([2, 1])
-    with preset_cols[0]:
-        sim_weight_source = st.selectbox(
-            "Use weights from",
-            ["My Portfolio weights", "Max Sharpe ratio portfolio weights",
-             "Min-variance portfolio weights"],
-            help="Load preset weights into the simulation. The Max Sharpe and Min-variance options are calculated from the efficient frontier for the current tickers."
-        )
-    with preset_cols[1]:
-        if st.button("Use selected weights", use_container_width=True):
-            loaded = False
-            if sim_weight_source == "My Portfolio weights":
-                loaded = reset_simulation_weights_to_my_portfolio(got, asset_prices)
-                if not loaded:
-                    st.info("No My Portfolio holdings are available for the current tickers yet.")
-            else:
-                if len(got) < 2:
-                    st.info("Add at least two tickers to calculate Max Sharpe or Min-variance weights.")
-                else:
-                    ef_calc = A.efficient_frontier(asset_rets, n_portfolios=10000, rf=rf, seed=7)
-                    if ef_calc is None:
-                        st.warning("Could not calculate an efficient frontier for the current tickers and time window.")
-                    else:
-                        row = (ef_calc["max_sharpe"]
-                               if sim_weight_source == "Max Sharpe ratio portfolio weights"
-                               else ef_calc["min_vol"])
-                        for t in got:
-                            st.session_state[f"w_{t}"] = round(float(row.get(t, 0.0)), 6)
-                        st.session_state["_weights_seeded"] = True
-                        loaded = True
-            if loaded:
-                st.success(f"Simulation weights loaded from {sim_weight_source}.")
-                st.rerun()
+    sim_weight_source = st.selectbox(
+        "Use weights from",
+        ["My Portfolio weights", "Max Sharpe ratio portfolio weights",
+         "Min-variance portfolio weights"],
+        help="The selected source is applied automatically. Max Sharpe and Min-variance are recalculated from the current efficient frontier whenever tickers or data change.",
+        key="sim_weight_source",
+    )
 
-    # One-time seed from the saved portfolio, by market value (reusing fetched prices).
-    if not st.session_state.get("_weights_seeded") and _held_shares:
-        reset_simulation_weights_to_my_portfolio(got, asset_prices)
     # Ensure every current ticker has a starting weight (covers no-ledger and added tickers).
     for t in got:
         st.session_state.setdefault(f"w_{t}", round(1.0 / len(got), 3))
+
+    if sim_weight_source == "My Portfolio weights":
+        if not apply_weight_map_to_simulation(got, my_portfolio_weight_map(got, asset_prices)):
+            st.info("No My Portfolio holdings are available for the current tickers yet.")
+    else:
+        selected_weights = frontier_weight_map(asset_rets, sim_weight_source, rf=rf, seed=7)
+        if selected_weights:
+            apply_weight_map_to_simulation(got, selected_weights)
+        elif len(got) < 2:
+            st.info("Add at least two tickers to calculate Max Sharpe or Min-variance weights.")
+        else:
+            st.warning("Could not calculate an efficient frontier for the current tickers and time window.")
 
     cols = st.columns(min(len(got), 4) or 1)
     weights = []
@@ -664,33 +673,36 @@ def _render_tracker(ledger, factor, sym, ccy, fx, benchmark):
     if seed is None:
         seed = _current_target_seed()
 
-    opt_cols = st.columns([2, 1])
-    with opt_cols[0]:
-        ef_choice = st.selectbox(
-            "Load target weights from",
-            ["Current My Portfolio weights", "Efficient frontier: Max Sharpe",
-             "Efficient frontier: Min variance"],
-            help="The efficient-frontier options use the price history of the tickers you currently hold."
-        )
-    with opt_cols[1]:
-        if st.button("Load into planner", use_container_width=True):
-            new_seed = _current_target_seed()
-            if ef_choice != "Current My Portfolio weights":
-                ef_tickers = held["Ticker"].tolist()
-                ef_prices = range_prices[[t for t in ef_tickers if t in range_prices.columns]].ffill()
-                ef_rets = A.compute_returns(ef_prices, log=use_log)
-                ef_calc = A.efficient_frontier(ef_rets, n_portfolios=10000, rf=rf, seed=7)
-                if ef_calc is None:
-                    st.warning("Could not calculate an efficient frontier for the current holdings and time window.")
-                else:
-                    row = ef_calc["max_sharpe"] if "Max Sharpe" in ef_choice else ef_calc["min_vol"]
-                    new_seed = pd.DataFrame({
-                        "Ticker": ef_calc["cols"],
-                        "Target %": [round(float(row[t]) * 100, 2) for t in ef_calc["cols"]],
-                    })
-            st.session_state["_target_seed_override"] = new_seed
-            st.session_state["_target_editor_version"] = st.session_state.get("_target_editor_version", 0) + 1
-            st.rerun()
+    ef_choice = st.selectbox(
+        "Load target weights from",
+        ["Current My Portfolio weights", "Efficient frontier: Max Sharpe",
+         "Efficient frontier: Min variance"],
+        help="The selected source is applied automatically. Efficient-frontier options use the current analysis tickers, so newly added tickers can enter the target trade plan.",
+        key="target_weight_source",
+    )
+
+    new_seed = _current_target_seed()
+    if ef_choice != "Current My Portfolio weights":
+        ef_tickers = [t for t in got if t in asset_prices.columns]
+        ef_prices = asset_prices[ef_tickers].ffill() if ef_tickers else pd.DataFrame()
+        ef_rets = A.compute_returns(ef_prices, log=use_log) if not ef_prices.empty else pd.DataFrame()
+        selected_weights = frontier_weight_map(ef_rets, ef_choice, rf=rf, seed=7)
+        if selected_weights:
+            new_seed = pd.DataFrame({
+                "Ticker": list(selected_weights.keys()),
+                "Target %": [round(float(selected_weights[t]) * 100, 2) for t in selected_weights],
+            })
+        else:
+            st.warning("Could not calculate an efficient frontier for the current tickers and time window.")
+
+    seed_signature = tuple((str(r["Ticker"]).upper(), round(float(r["Target %"]), 4))
+                           for _, r in new_seed.iterrows())
+    source_signature = (ef_choice, tuple(got), period_label, use_log, round(rf, 8), seed_signature)
+    if source_signature != st.session_state.get("_target_source_signature"):
+        st.session_state["_target_seed_override"] = new_seed
+        st.session_state["_target_source_signature"] = source_signature
+        st.session_state["_target_editor_version"] = st.session_state.get("_target_editor_version", 0) + 1
+        seed = new_seed
 
     target_edit = st.data_editor(seed, num_rows="dynamic", use_container_width=True,
                                  key=f"target_editor_{st.session_state.get('_target_editor_version', 0)}",
