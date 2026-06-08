@@ -826,4 +826,3 @@ with tab_xl:
         st.caption(f"Values in {mp['currency']}. Sheets: Summary, Holdings (with Weight), "
                    "Ledger, Growth (TWR vs benchmark).")
         st.dataframe(mp["summary"], hide_index=True, use_container_width=True)
-
