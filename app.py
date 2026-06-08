@@ -186,10 +186,10 @@ have_bench = benchmark in prices.columns
 mkt_rets = rets[benchmark] if have_bench else None
 asset_prices, asset_rets = prices[got], rets[got]
 
-(tab_track, tab_port, tab_cmp, tab_chart, tab_norm, tab_mc, tab_ef,
+(tab_track, tab_port, tab_cmp, tab_chart, tab_norm, tab_ef, tab_mc,
  tab_bench, tab_xl) = st.tabs(
     ["My portfolio", "Simulate portfolio", "Compare assets", "Charts & trends",
-     "Normality", "Monte Carlo", "Efficient frontier",
+     "Normality", "Efficient frontier", "Monte Carlo",
      "Benchmark comparison", "Export"])
 
 
@@ -289,12 +289,39 @@ with tab_port:
                "change them freely. Risk uses covariance, so it's usually below the "
                "average of individual vols — diversification.")
 
-    if st.button("↩️ Reset weights to My Portfolio weights", use_container_width=True):
-        if reset_simulation_weights_to_my_portfolio(got, asset_prices):
-            st.success("Simulation weights reset to your current My Portfolio market-value weights.")
-            st.rerun()
-        else:
-            st.info("No My Portfolio holdings are available for the current tickers yet.")
+    preset_cols = st.columns([2, 1])
+    with preset_cols[0]:
+        sim_weight_source = st.selectbox(
+            "Use weights from",
+            ["My Portfolio weights", "Max Sharpe ratio portfolio weights",
+             "Min-variance portfolio weights"],
+            help="Load preset weights into the simulation. The Max Sharpe and Min-variance options are calculated from the efficient frontier for the current tickers."
+        )
+    with preset_cols[1]:
+        if st.button("Use selected weights", use_container_width=True):
+            loaded = False
+            if sim_weight_source == "My Portfolio weights":
+                loaded = reset_simulation_weights_to_my_portfolio(got, asset_prices)
+                if not loaded:
+                    st.info("No My Portfolio holdings are available for the current tickers yet.")
+            else:
+                if len(got) < 2:
+                    st.info("Add at least two tickers to calculate Max Sharpe or Min-variance weights.")
+                else:
+                    ef_calc = A.efficient_frontier(asset_rets, n_portfolios=10000, rf=rf, seed=7)
+                    if ef_calc is None:
+                        st.warning("Could not calculate an efficient frontier for the current tickers and time window.")
+                    else:
+                        row = (ef_calc["max_sharpe"]
+                               if sim_weight_source == "Max Sharpe ratio portfolio weights"
+                               else ef_calc["min_vol"])
+                        for t in got:
+                            st.session_state[f"w_{t}"] = round(float(row.get(t, 0.0)), 6)
+                        st.session_state["_weights_seeded"] = True
+                        loaded = True
+            if loaded:
+                st.success(f"Simulation weights loaded from {sim_weight_source}.")
+                st.rerun()
 
     # One-time seed from the saved portfolio, by market value (reusing fetched prices).
     if not st.session_state.get("_weights_seeded") and _held_shares:
