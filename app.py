@@ -94,15 +94,24 @@ period = A.PERIOD_MAP[period_label]
 # --------------------------------------------------------------------------- #
 # Cached loaders
 # --------------------------------------------------------------------------- #
+class _NoData(Exception):
+    pass
+
+
 @st.cache_data(ttl=21600, show_spinner="Fetching prices…")
 def load(all_tickers_tuple, period, use_log):
     prices = A.fetch_prices(list(all_tickers_tuple), period)
+    if prices.empty:
+        raise _NoData()          # exceptions are never cached — forces a fresh fetch next time
     return prices, A.compute_returns(prices, log=use_log)
 
 
 @st.cache_data(ttl=21600, show_spinner="Fetching holding history…")
 def load_range(tickers_tuple, start_iso):
-    return A.fetch_prices_range(list(tickers_tuple), start_iso)
+    result = A.fetch_prices_range(list(tickers_tuple), start_iso)
+    if result.empty:
+        raise _NoData()
+    return result
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -126,9 +135,16 @@ if not tickers:
     st.stop()
 
 all_tickers = tickers + ([benchmark] if benchmark and benchmark not in tickers else [])
-prices, rets = load(tuple(all_tickers), period, use_log)
-if prices.empty:
-    st.error("No data returned. Check the ticker symbols and try again.")
+try:
+    prices, rets = load(tuple(all_tickers), period, use_log)
+except _NoData:
+    st.error("No data returned from Yahoo Finance for these tickers / time window.")
+    st.caption(
+        "This sometimes happens when Yahoo briefly rate-limits the server. "
+        "The failed result is **not** cached, so clicking Refresh will try again immediately.")
+    if st.button("🔄 Refresh data"):
+        st.cache_data.clear()
+        st.rerun()
     st.stop()
 
 got = [t for t in tickers if t in prices.columns]
@@ -452,9 +468,14 @@ def _render_tracker(ledger, factor, sym, ccy, fx, benchmark):
     led_tickers = sorted(ledger["ticker"].unique())
     start = (ledger["date"].min() - pd.Timedelta(days=5)).strftime("%Y-%m-%d")
     fetch_list = led_tickers + ([benchmark] if benchmark not in led_tickers else [])
-    range_prices = load_range(tuple(fetch_list), start)
-    if range_prices.empty:
+    try:
+        range_prices = load_range(tuple(fetch_list), start)
+    except _NoData:
         st.error("Couldn't fetch price history for your holdings.")
+        st.caption("Yahoo Finance may be temporarily unavailable. Click Refresh to retry.")
+        if st.button("🔄 Refresh data", key="refresh_tracker"):
+            st.cache_data.clear()
+            st.rerun()
         return None
     latest = {t: float(range_prices[t].dropna().iloc[-1])
               for t in led_tickers if t in range_prices.columns}
