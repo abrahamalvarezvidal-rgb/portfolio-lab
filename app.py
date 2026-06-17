@@ -8,6 +8,8 @@ Tabs:
   Charts & trends · Normality · Efficient frontier · Monte Carlo ·
   Benchmark comparison · Export to Excel
 """
+import re
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -42,13 +44,104 @@ def ledger_holdings_shares():
     return out
 
 
+# --------------------------------------------------------------------------- #
+# Robust ledger import
+# Finds a trade-ledger table inside ANY uploaded CSV / xlsx, no matter which
+# sheet it lives on, how many rows sit above the header, or what extra columns
+# sit beside it (e.g. a PORTFOLIO HOLDINGS table or Signed Qty / Net Cost helper
+# columns). Detection is by column-header names, so the ledger is located even
+# when it shares a sheet with unrelated tables.
+# --------------------------------------------------------------------------- #
+_LEDGER_COLUMNS = ["date", "ticker", "action", "quantity", "price", "fees", "broker"]
+_LEDGER_REQUIRED = {"date", "ticker", "action", "quantity", "price"}
+
+_LEDGER_SYNONYMS = {
+    "date":     {"date", "trade date", "transaction date", "datum", "trade dt"},
+    "ticker":   {"ticker", "symbol", "stock", "asset", "security"},
+    "action":   {"action", "type", "side", "transaction type", "buy sell",
+                 "buy/sell", "trade type", "direction"},
+    "quantity": {"quantity", "qty", "shares", "units", "no of shares",
+                 "number of shares", "share qty"},
+    "price":    {"price", "unit price", "price per share", "share price",
+                 "cost per share", "fill price", "exec price"},
+    "fees":     {"fees", "fee", "commission", "commissions", "charges"},
+    "broker":   {"broker", "account", "platform", "exchange", "brokerage"},
+}
+
+
+def _norm_header(x):
+    """Normalize a header cell: lowercase, drop '(USD)'-style units and punctuation."""
+    if x is None:
+        return ""
+    s = re.sub(r"\(.*?\)", " ", str(x))                 # strip "(USD)" etc.
+    s = s.replace("/", " ").replace("_", " ").replace("-", " ")
+    s = re.sub(r"[^a-z0-9 ]", " ", s.lower())
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _match_ledger_field(norm_header):
+    for field, names in _LEDGER_SYNONYMS.items():
+        if norm_header in names:
+            return field
+    return None
+
+
+def _coerce_ledger(body):
+    """Give clean_ledger the same well-typed columns a clean read_excel would."""
+    body["date"] = pd.to_datetime(body["date"], errors="coerce")
+    for c in ("quantity", "price", "fees"):
+        body[c] = pd.to_numeric(body[c], errors="coerce")
+    body["fees"] = body["fees"].fillna(0.0)
+    for c in ("ticker", "action", "broker"):
+        body[c] = body[c].astype(str).str.strip().replace({"nan": "", "None": ""})
+    return body
+
+
+def _ledger_from_raw_frame(raw):
+    """raw = a header=None DataFrame of one sheet. Locate a ledger-shaped table by
+    its header row and return a canonical 7-column ledger, or None."""
+    for h in range(min(len(raw), 60)):
+        col_for_field = {}
+        for col_idx, cell in enumerate(raw.iloc[h].values):
+            field = _match_ledger_field(_norm_header(cell))
+            if field and field not in col_for_field:       # first occurrence wins
+                col_for_field[field] = col_idx
+        if not _LEDGER_REQUIRED.issubset(col_for_field):
+            continue
+        ordered = [f for f in _LEDGER_COLUMNS if f in col_for_field]
+        body = raw.iloc[h + 1:, [col_for_field[f] for f in ordered]].copy()
+        body.columns = ordered
+        for missing in set(_LEDGER_COLUMNS) - set(ordered):
+            body[missing] = 0.0 if missing == "fees" else ""
+        body = body[_LEDGER_COLUMNS]
+        # keep only real trade rows (a ticker present) -> drops blank tails and
+        # any neighbouring holdings table that has no ledger columns of its own
+        body = body[body["ticker"].apply(
+            lambda v: pd.notna(v) and str(v).strip() not in ("", "Total"))]
+        if not body.empty:
+            return _coerce_ledger(body.reset_index(drop=True))
+    return None
+
+
 def load_uploaded_ledger(uploaded):
-    """Read a ledger from an uploaded CSV, or from a my_portfolio.xlsx export (its
-    'Ledger' sheet). Returns a cleaned DataFrame, or None if it can't be parsed."""
+    """Read a ledger from an uploaded CSV, or from any xlsx — the app's own
+    my_portfolio.xlsx export (its 'Ledger' sheet) or an arbitrary workbook where
+    the ledger sits on some other sheet (e.g. a 'Portfolio' sheet with the table
+    starting partway down, alongside other tables). Returns a cleaned DataFrame,
+    or None if no ledger-shaped table can be found."""
     name = (getattr(uploaded, "name", "") or "").lower()
     try:
         if name.endswith((".xlsx", ".xls")):
-            raw = pd.read_excel(uploaded, sheet_name="Ledger")
+            sheets = pd.read_excel(uploaded, sheet_name=None, header=None)
+            # fast path: a sheet literally named "Ledger" (the app's own export)
+            ordered_sheets = sorted(
+                sheets.items(),
+                key=lambda kv: 0 if str(kv[0]).strip().lower() == "ledger" else 1)
+            for _name, frame in ordered_sheets:
+                led = _ledger_from_raw_frame(frame)
+                if led is not None:
+                    return PT.clean_ledger(led)
+            return None
         else:
             raw = pd.read_csv(uploaded)
     except Exception:
@@ -802,8 +895,9 @@ with tab_track:
         st.session_state["_last_upload_id"] = up_id
         new_led = load_uploaded_ledger(up)
         if new_led is None:
-            st.error("Couldn't read a ledger from that file. For Excel, use a "
-                     "my_portfolio.xlsx export that contains a 'Ledger' sheet.")
+            st.error("Couldn't read a ledger from that file. The sheet needs columns for "
+                     "Date, Ticker, Action, Quantity and Price (Fees and Broker are "
+                     "optional). A my_portfolio.xlsx export with a 'Ledger' sheet always works.")
         else:
             st.session_state["ledger"] = new_led
             held = {tk for tk, g in new_led.groupby("ticker")
